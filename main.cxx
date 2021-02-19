@@ -140,9 +140,11 @@ int main(int argc, char* argv[])
 
 	float* uni_x = (float*)malloc(sizeof(float)*num_pts_slice);
 	float* uni_y = (float*)malloc(sizeof(float)*num_pts_slice); 
-	vtkm::cont::ArrayHandle<vtkm::Particle> start_set, current_set;
+	vtkm::cont::ArrayHandle<vtkm::Particle> start_set, current_set, test_set;
 	start_set.Allocate(num_pts_slice);
 	current_set.Allocate(num_pts_slice);
+	test_set.Allocate(num_pts_slice);
+
 	 using Vec3f = vtkm::Vec<vtkm::FloatDefault, 3>;		
   	
 	vtkm::cont::ArrayHandle<vtkm::Vec2f> lcsInputPoints, lcsOutputPoints;
@@ -158,6 +160,7 @@ int main(int argc, char* argv[])
 			uni_y[index] = yc[0] + j*y_spacing;
 			start_set.WritePortal().Set(index, vtkm::Particle(Vec3f(static_cast<vtkm::FloatDefault>(uni_x[index]), static_cast<vtkm::FloatDefault>(uni_y[index]), static_cast<vtkm::FloatDefault>(0.0)), index));
 			current_set.WritePortal().Set(index, vtkm::Particle(Vec3f(static_cast<vtkm::FloatDefault>(uni_x[index]), static_cast<vtkm::FloatDefault>(uni_y[index]), static_cast<vtkm::FloatDefault>(0.0)), index));
+			test_set.WritePortal().Set(index, vtkm::Particle(Vec3f(static_cast<vtkm::FloatDefault>(uni_x[index]), static_cast<vtkm::FloatDefault>(uni_y[index]), static_cast<vtkm::FloatDefault>(0.0)), index));
 			lcsInputPoints.WritePortal().Set(index, vtkm::Vec2f(static_cast<vtkm::FloatDefault>(uni_x[index]), static_cast<vtkm::FloatDefault>(uni_y[index])));
 			lcsOutputPoints.WritePortal().Set(index, vtkm::Vec2f(static_cast<vtkm::FloatDefault>(uni_x[index]), static_cast<vtkm::FloatDefault>(uni_y[index])));
 		}
@@ -179,7 +182,12 @@ int main(int argc, char* argv[])
 
 
 	vtkm::cont::ArrayHandle<vtkm::Vec<vtkm::FloatDefault, 3>> velocity_field;
+	vtkm::cont::ArrayHandle<vtkm::Vec<vtkm::FloatDefault, 3>> flowmap_field;
+	
+
 	velocity_field.Allocate(num_pts);
+	flowmap_field.Allocate(num_pts_slice);
+
 	for(int i = 0; i < num_pts; i++)
 	{
 		velocity_field.WritePortal().Set(i, vtkm::Vec<vtkm::FloatDefault, 3>(att1->GetTuple1(i), att2->GetTuple1(i), 1.0));
@@ -187,42 +195,50 @@ int main(int argc, char* argv[])
 
 /* Create the particle advection worklet set up */
 
-	using FieldHandle = vtkm::cont::ArrayHandle<vtkm::Vec<vtkm::FloatDefault, 3>>;	
-	const vtkm::cont::DynamicCellSet& cells = dataset.GetCellSet();
-	const vtkm::cont::CoordinateSystem& coords = dataset.GetCoordinateSystem();
-	using GridEvalType = vtkm::worklet::particleadvection::GridEvaluator<FieldHandle>;
+	using FieldHandle3d = vtkm::cont::ArrayHandle<vtkm::Vec<vtkm::FloatDefault, 3>>;	
+	const vtkm::cont::DynamicCellSet& cells3d = dataset.GetCellSet();
+	const vtkm::cont::CoordinateSystem& coords3d = dataset.GetCoordinateSystem();
+	using GridEvalType3d = vtkm::worklet::particleadvection::GridEvaluator<FieldHandle3d>;
 	
-	vtkm::worklet::ParticleAdvection particleadvection;
-	vtkm::worklet::ParticleAdvectionResult res;
-
-	using RK4Type = vtkm::worklet::particleadvection::RK4Integrator<GridEvalType>;
-	GridEvalType eval_ftle(coords, cells, velocity_field);
+	using RK4Type = vtkm::worklet::particleadvection::RK4Integrator<GridEvalType3d>;
+	GridEvalType3d eval_ftle(coords3d, cells3d, velocity_field);
 	RK4Type rk4(eval_ftle, static_cast<vtkm::Float32>(0.01));
 	
-/* Set up FTLE computation */
-
-	vtkm::cont::DataSet lcsInput;
+	vtkm::cont::DataSet flowmap;
 	vtkm::Id2 lcsGridDims(dims[0], dims[1]);	
 	vtkm::Vec2f origin2d(static_cast<vtkm::FloatDefault>(xc[0]),
 									 static_cast<vtkm::FloatDefault>(yc[0]));
 	vtkm::Vec2f spacing2d(static_cast<vtkm::FloatDefault>(x_spacing),
 										static_cast<vtkm::FloatDefault>(y_spacing));
 	vtkm::cont::DataSetBuilderUniform uniformDatasetBuilder2d;
-	lcsInput = uniformDatasetBuilder2d.Create(lcsGridDims, origin2d, spacing2d);
-	vtkm::cont::DynamicCellSet lcsCellSet = lcsInput.GetCellSet();
+	flowmap = uniformDatasetBuilder2d.Create(lcsGridDims, origin2d, spacing2d);
 		
 /* Set up output -- need to update to work for VTK better */
 
   vtkm::cont::DataSet output;
-  output.AddCoordinateSystem(lcsInput.GetCoordinateSystem());
-  output.SetCellSet(lcsInput.GetCellSet());
+  output.AddCoordinateSystem(flowmap.GetCoordinateSystem());
+  output.SetCellSet(flowmap.GetCellSet());
+
+/* Set up bilinear Lagrangian-based interpolation using existing VTK-m infrastructure. Use Euler step with step size = 1 and flow maps as input. */
+
+
+	const vtkm::cont::DynamicCellSet& cells2d = flowmap.GetCellSet();
+	const vtkm::cont::CoordinateSystem& coords2d = flowmap.GetCoordinateSystem();
+	
+	using LagrangianType = vtkm::worklet::particleadvection::EulerIntegrator<GridEvalType3d>;
+
+	vtkm::worklet::ParticleAdvection particleadvection;
+	vtkm::worklet::ParticleAdvectionResult res_rk4, res_lag;
+	
+/* Set up FTLE computation */
+
 
 	for(int c = 1; c <= 10; c++)
 	{
-		res = particleadvection.Run(rk4, current_set, 100);
+		res_rk4 = particleadvection.Run(rk4, current_set, 100);
 
-		// Use res to update the current_set and lcsOutputPoints
-		auto updated_particles = res.Particles;
+		// Use res_rk4 to update the current_set and lcsOutputPoints
+		auto updated_particles = res_rk4.Particles;
 		for(int i = 0; i < num_pts_slice; i++)
 		{
 			auto pt = updated_particles.ReadPortal().Get(i).Pos;
@@ -234,14 +250,55 @@ int main(int argc, char* argv[])
 		}
 	
 		vtkm::FloatDefault advectionTime = c*1.0f;
-  	vtkm::cont::ArrayHandle<vtkm::FloatDefault> outputField;
+  	vtkm::cont::ArrayHandle<vtkm::FloatDefault> ftleField;
 		using AnalysisType = vtkm::worklet::LagrangianStructures<2>;
-  	AnalysisType ftleCalculator(advectionTime, lcsCellSet);
+  	AnalysisType ftleCalculator(advectionTime, cells2d);
   	vtkm::worklet::DispatcherMapField<AnalysisType> dispatcher(ftleCalculator);
-	  dispatcher.Invoke(lcsInputPoints, lcsOutputPoints, outputField);
+	  dispatcher.Invoke(lcsInputPoints, lcsOutputPoints, ftleField);
+
+		// generate flow map for this time interval 
+
+		/*
+ *  Initialize basis trajectories at c-1. 
+ *  Run rk4 again. Use the output to create flowmap_field. 
+ */
+		vtkm::cont::ArrayHandle<vtkm::Particle> basis_set;
+		basis_set.Allocate(num_pts_slice);
+	
+		for(int i = 0; i < num_pts_slice; i++)
+		{
+	      basis_set.WritePortal().Set(i, vtkm::Particle(Vec3f(static_cast<vtkm::FloatDefault>(uni_x[i]), 
+																														static_cast<vtkm::FloatDefault>(uni_y[i]), 
+																														static_cast<vtkm::FloatDefault>(c-1)), i));
+		}
+			
+		res_rk4 = particleadvection.Run(rk4, basis_set, 100);	
+		auto updated_basis = res_rk4.Particles;	
+		for(int i = 0; i < num_pts_slice; i++)
+		{
+			auto pt = updated_basis.ReadPortal().Get(i).Pos;
+			flowmap_field.WritePortal().Set(i, vtkm::Vec<vtkm::FloatDefault, 3>(static_cast<vtkm::FloatDefault>(pt[0]), static_cast<vtkm::FloatDefault>(pt[1]), static_cast<vtkm::FloatDefault>(0.0)));
+		}
+			
+		GridEvalType2d eval_lagrangian(coords2d, cells2d, flowmap_field);
+		LagrangianType lagrangian(eval_lagrangian, static_cast<vtkm::Float32>(1.0));
+/*		
+		res_lag = particleadvection.Run(lagrangian, test_set, 1);	
+	// Use res_lag to update test_set , and compute uncertainty. 
+		
+		auto updated_test = res_lag.Particles;
+		for(int i = 0; i < num_pts_slice; i++)
+    {
+     	auto pt = updated_test.ReadPortal().Get(i).Pos;
+     	test_set.WritePortal().Set(i, vtkm::Particle(Vec3f(static_cast<vtkm::FloatDefault>(pt[0]),
+       	                                                 static_cast<vtkm::FloatDefault>(pt[1]),
+         	                                               static_cast<vtkm::FloatDefault>(c)), i));
+    }	
+*/
+	// Add fields computed this iteration to a dataset.
 		std::stringstream field_name;
 		field_name << "ftle_" << c;
-  	output.AddPointField(field_name.str().c_str(), outputField);
+  	output.AddPointField(field_name.str().c_str(), ftleField);
 		std::cout << "Completed interval : " << c << std::endl;
 	}
 	
