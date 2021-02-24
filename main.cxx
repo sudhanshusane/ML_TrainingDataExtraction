@@ -8,8 +8,10 @@
 #include <vtkStructuredGrid.h>
 #include <vtkGradientFilter.h>
 #include <vtkDataSet.h>
+#include <vtkDataSetWriter.h>
 #include <sstream>
 #include <iostream>
+#include <omp.h>
 #include <vtkm/Matrix.h>
 #include <vtkm/Types.h>
 #include <vtkm/cont/DataSet.h>
@@ -28,11 +30,10 @@
 #include <vtkm/worklet/particleadvection/GridEvaluators.h>
 #include <vtkm/worklet/particleadvection/Integrators.h>
 #include <vtkm/worklet/particleadvection/Particles.h>
-
-
+#include <vtkm/cont/VariantArrayHandle.h>
+#include <vtkm/cont/ArrayHandleVirtual.h>
 #include <vtkm/worklet/lcs/GridMetaData.h>
 #include <vtkm/worklet/lcs/LagrangianStructureHelpers.h>
-
 #include <vtkm/worklet/LagrangianStructures.h>
 
 int main(int argc, char* argv[])
@@ -46,10 +47,12 @@ int main(int argc, char* argv[])
  * flow maps
  * ftle 
  */
-
+	
 	std::stringstream s;
 	s << argv[1] << argv[2] << argv[3];
 	std::cout << "Inputfile: " << s.str() << std::endl;
+
+	std::string output_file(argv[4]);
 
   vtkSmartPointer<vtkRectilinearGridReader> reader =
     vtkSmartPointer<vtkRectilinearGridReader>::New();
@@ -78,9 +81,26 @@ int main(int argc, char* argv[])
   float *yc = (float*) mesh->GetYCoordinates()->GetVoidPointer(0);
   float *zc = (float*) mesh->GetZCoordinates()->GetVoidPointer(0);
 
+	vtkSmartPointer<vtkFloatArray> zCoords = vtkSmartPointer<vtkFloatArray>::New();
+	zCoords->InsertNextValue(0.0);
+
 	float x_spacing = (xc[dims[0]-1] - xc[0])/(dims[0]-1);
 	float y_spacing = (yc[dims[1]-1] - yc[0])/(dims[1]-1);
 	float z_spacing = (zc[dims[2]-1] - zc[0])/(dims[2]-1);	
+
+/* Create output file */
+
+	vtkSmartPointer<vtkDataSetWriter> writer =
+		vtkSmartPointer<vtkDataSetWriter>::New();
+
+	vtkSmartPointer<vtkRectilinearGrid> outputGrid = 
+		vtkSmartPointer<vtkRectilinearGrid>::New();
+	
+	outputGrid->SetDimensions(dims[0], dims[1], 1);
+  outputGrid->SetXCoordinates(mesh->GetXCoordinates());
+  outputGrid->SetYCoordinates(mesh->GetYCoordinates());
+  outputGrid->SetZCoordinates(zCoords);
+
 
 /* Extract 2D slice */ 
 
@@ -90,17 +110,19 @@ int main(int argc, char* argv[])
 	vel_array->SetNumberOfTuples(num_pts_slice);
 	vel_array->SetName("velocity");
 
+	int k = atoi(argv[5]); // Slice at z = 1
 	for(int j = 0; j < dims[1]; j++)
 	{
 		for(int i = 0; i < dims[0]; i++)
 		{
-			int index = j*dims[0] + i;
+			int index1 = k*dims[1]*dims[0] + j*dims[0] + i;
+			int index2 = j*dims[0] + i;
 			double vec[3];
-			vec[0] = att1->GetTuple1(index);
-			vec[1] = att2->GetTuple1(index);
+			vec[0] = att1->GetTuple1(index1);
+			vec[1] = att2->GetTuple1(index1);
 			vec[2] = 0.0;
 			points->InsertNextPoint(xc[i], yc[j], 0);
-			vel_array->InsertTuple(index, vec);	
+			vel_array->InsertTuple(index2, vec);	
 		}
 	}	
 
@@ -114,20 +136,41 @@ int main(int argc, char* argv[])
 	gradient->SetInputScalars(vtkDataObject::FIELD_ASSOCIATION_POINTS, "velocity");
 	gradient->SetComputeVorticity(1);
 	gradient->SetComputeQCriterion(1);
-	gradient->SetComputeDivergence(1);
+	gradient->SetComputeDivergence(0);
 	gradient->Update();
 
-  vtkDoubleArray *gradient_field = vtkDoubleArray::SafeDownCast(gradient->GetOutput()->GetPointData()->GetArray("Gradients"));
-  vtkDoubleArray *vorticity_field = vtkDoubleArray::SafeDownCast(gradient->GetOutput()->GetPointData()->GetArray("Vorticity"));
+//  vtkDoubleArray *gradient_field = vtkDoubleArray::SafeDownCast(gradient->GetOutput()->GetPointData()->GetArray("Gradients"));
+//	gradient_field->SetName("gradient");
+//	outputGrid->GetPointData()->AddArray(gradient_field);
+
+//  vtkDoubleArray *divergence_field = vtkDoubleArray::SafeDownCast(gradient->GetOutput()->GetPointData()->GetArray("Divergence"));
+//	divergence_field->SetName("divergence");
+//	outputGrid->GetPointData()->AddArray(divergence_field);
+
   vtkDoubleArray *qcriterion_field = vtkDoubleArray::SafeDownCast(gradient->GetOutput()->GetPointData()->GetArray("Q-criterion"));
-  vtkDoubleArray *divergence_field = vtkDoubleArray::SafeDownCast(gradient->GetOutput()->GetPointData()->GetArray("Divergence"));
+	qcriterion_field->SetName("qc");
+	outputGrid->GetPointData()->AddArray(qcriterion_field);
 
-	std::cout << "Gradient field: " << gradient_field->GetNumberOfValues() << " , " << gradient_field->GetNumberOfComponents() << std::endl;
-	std::cout << "Vorticity field: " << vorticity_field->GetNumberOfValues() << " , " << vorticity_field->GetNumberOfComponents() << std::endl;
-	std::cout << "Q-criterion field: " << qcriterion_field->GetNumberOfValues() << " , " << qcriterion_field->GetNumberOfComponents() << std::endl;
-	std::cout << "Divergence field: " << divergence_field->GetNumberOfValues() << " , " << divergence_field->GetNumberOfComponents() << std::endl;
+  vtkDoubleArray *vorticity_field = vtkDoubleArray::SafeDownCast(gradient->GetOutput()->GetPointData()->GetArray("Vorticity"));
+	vtkSmartPointer<vtkFloatArray> vortmag_field = vtkSmartPointer<vtkFloatArray>::New();
+	vortmag_field->SetName("vortmag");
+	for(int i = 0; i < num_pts_slice; i++)
+	{
+		double pt_vort[3];
+		vorticity_field->GetTuple(i, pt_vort);	
+		float val = sqrt(pow(pt_vort[0],2.0) + pow(pt_vort[1],2.0) + pow(pt_vort[2], 2.0));
+		vortmag_field->InsertNextValue(val);
+	}
+	outputGrid->GetPointData()->AddArray(vortmag_field);
+	
+	std::cout << "Extracted fields from select time slices." << std::endl;
 
-	/*
+//	std::cout << "Gradient field: " << gradient_field->GetNumberOfValues() << " , " << gradient_field->GetNumberOfComponents() << std::endl;
+//	std::cout << "Vorticity field: " << vorticity_field->GetNumberOfValues() << " , " << vorticity_field->GetNumberOfComponents() << std::endl;
+//	std::cout << "Q-criterion field: " << qcriterion_field->GetNumberOfValues() << " , " << qcriterion_field->GetNumberOfComponents() << std::endl;
+//	std::cout << "Divergence field: " << divergence_field->GetNumberOfValues() << " , " << divergence_field->GetNumberOfComponents() << std::endl;
+	
+/*
  *  For a grid of starting locations S in three dimensions.
  *  I want to compute where these particles travel after time = 1 and 2, with a step size of 0.01, 100 and 200 steps 
  *  I want to store the locations at t1 and the corresponding ftle. 
@@ -140,7 +183,11 @@ int main(int argc, char* argv[])
 
 	float* uni_x = (float*)malloc(sizeof(float)*num_pts_slice);
 	float* uni_y = (float*)malloc(sizeof(float)*num_pts_slice); 
+	vtkm::cont::ArrayHandle<vtkm::FloatDefault> aedr;
+	vtkm::cont::ArrayHandle<vtkm::FloatDefault> endpt;
 	vtkm::cont::ArrayHandle<vtkm::Particle> start_set, current_set, test_set;
+	aedr.Allocate(num_pts_slice);
+	endpt.Allocate(num_pts_slice);
 	start_set.Allocate(num_pts_slice);
 	current_set.Allocate(num_pts_slice);
 	test_set.Allocate(num_pts_slice);
@@ -151,6 +198,7 @@ int main(int argc, char* argv[])
 	lcsInputPoints.Allocate(dims[0]*dims[1]);		
 	lcsOutputPoints.Allocate(dims[0]*dims[1]);
 	
+//	#pragma omp parallel for 
 	for(int j = 0; j < dims[1]; j++)
 	{
 		for(int i = 0; i < dims[0]; i++)
@@ -158,11 +206,21 @@ int main(int argc, char* argv[])
 			int index = j*dims[0] + i;
 			uni_x[index] = xc[0] + i*x_spacing;
 			uni_y[index] = yc[0] + j*y_spacing;
-			start_set.WritePortal().Set(index, vtkm::Particle(Vec3f(static_cast<vtkm::FloatDefault>(uni_x[index]), static_cast<vtkm::FloatDefault>(uni_y[index]), static_cast<vtkm::FloatDefault>(0.0)), index));
-			current_set.WritePortal().Set(index, vtkm::Particle(Vec3f(static_cast<vtkm::FloatDefault>(uni_x[index]), static_cast<vtkm::FloatDefault>(uni_y[index]), static_cast<vtkm::FloatDefault>(0.0)), index));
-			test_set.WritePortal().Set(index, vtkm::Particle(Vec3f(static_cast<vtkm::FloatDefault>(uni_x[index]), static_cast<vtkm::FloatDefault>(uni_y[index]), static_cast<vtkm::FloatDefault>(0.0)), index));
-			lcsInputPoints.WritePortal().Set(index, vtkm::Vec2f(static_cast<vtkm::FloatDefault>(uni_x[index]), static_cast<vtkm::FloatDefault>(uni_y[index])));
-			lcsOutputPoints.WritePortal().Set(index, vtkm::Vec2f(static_cast<vtkm::FloatDefault>(uni_x[index]), static_cast<vtkm::FloatDefault>(uni_y[index])));
+			start_set.WritePortal().Set(index, vtkm::Particle(Vec3f(static_cast<vtkm::FloatDefault>(uni_x[index]), 
+																															static_cast<vtkm::FloatDefault>(uni_y[index]), 
+																															static_cast<vtkm::FloatDefault>(0.0)), index));
+			current_set.WritePortal().Set(index, vtkm::Particle(Vec3f(static_cast<vtkm::FloatDefault>(uni_x[index]), 
+																																static_cast<vtkm::FloatDefault>(uni_y[index]), 
+																																static_cast<vtkm::FloatDefault>(0.0)), index));
+			test_set.WritePortal().Set(index, vtkm::Particle(Vec3f(static_cast<vtkm::FloatDefault>(uni_x[index]), 
+																														static_cast<vtkm::FloatDefault>(uni_y[index]), 
+																														static_cast<vtkm::FloatDefault>(0.0)), index));
+			lcsInputPoints.WritePortal().Set(index, vtkm::Vec2f(static_cast<vtkm::FloatDefault>(uni_x[index]), 
+																													static_cast<vtkm::FloatDefault>(uni_y[index])));
+			lcsOutputPoints.WritePortal().Set(index, vtkm::Vec2f(static_cast<vtkm::FloatDefault>(uni_x[index]), 
+																														static_cast<vtkm::FloatDefault>(uni_y[index])));
+			aedr.WritePortal().Set(index, 0.0f);
+			endpt.WritePortal().Set(index, 0.0f);
 		}
 	}
 
@@ -183,11 +241,10 @@ int main(int argc, char* argv[])
 
 	vtkm::cont::ArrayHandle<vtkm::Vec<vtkm::FloatDefault, 3>> velocity_field;
 	vtkm::cont::ArrayHandle<vtkm::Vec<vtkm::FloatDefault, 3>> flowmap_field;
-	
-
 	velocity_field.Allocate(num_pts);
 	flowmap_field.Allocate(num_pts_slice);
 
+//	#pragma omp parallel for
 	for(int i = 0; i < num_pts; i++)
 	{
 		velocity_field.WritePortal().Set(i, vtkm::Vec<vtkm::FloatDefault, 3>(att1->GetTuple1(i), att2->GetTuple1(i), 1.0));
@@ -195,6 +252,8 @@ int main(int argc, char* argv[])
 
 /* Create the particle advection worklet set up */
 
+	vtkm::Float32 aedr_threshold = x_spacing*(dims[0]-1);
+	vtkm::Float32 step_size = 0.01;
 	using FieldHandle3d = vtkm::cont::ArrayHandle<vtkm::Vec<vtkm::FloatDefault, 3>>;	
 	const vtkm::cont::DynamicCellSet& cells3d = dataset.GetCellSet();
 	const vtkm::cont::CoordinateSystem& coords3d = dataset.GetCoordinateSystem();
@@ -202,7 +261,7 @@ int main(int argc, char* argv[])
 	
 	using RK4Type = vtkm::worklet::particleadvection::RK4Integrator<GridEvalType3d>;
 	GridEvalType3d eval_ftle(coords3d, cells3d, velocity_field);
-	RK4Type rk4(eval_ftle, static_cast<vtkm::Float32>(0.01));
+	RK4Type rk4(eval_ftle, static_cast<vtkm::Float32>(step_size));
 	
 	vtkm::cont::DataSet flowmap;
 	vtkm::Id2 lcsGridDims(dims[0], dims[1]);	
@@ -221,7 +280,6 @@ int main(int argc, char* argv[])
 
 /* Set up bilinear Lagrangian-based interpolation using existing VTK-m infrastructure. Use Euler step with step size = 1 and flow maps as input. */
 
-
 	const vtkm::cont::DynamicCellSet& cells2d = flowmap.GetCellSet();
 	const vtkm::cont::CoordinateSystem& coords2d = flowmap.GetCoordinateSystem();
 	
@@ -232,13 +290,14 @@ int main(int argc, char* argv[])
 	
 /* Set up FTLE computation */
 
-
-	for(int c = 1; c <= 10; c++)
+	int end_time = atoi(argv[6]);
+	for(int c = 1; c <= end_time; c++)
 	{
 		res_rk4 = particleadvection.Run(rk4, current_set, 100);
 
 		// Use res_rk4 to update the current_set and lcsOutputPoints
 		auto updated_particles = res_rk4.Particles;
+//		#pragma omp parallel for
 		for(int i = 0; i < num_pts_slice; i++)
 		{
 			auto pt = updated_particles.ReadPortal().Get(i).Pos;
@@ -256,6 +315,18 @@ int main(int argc, char* argv[])
   	vtkm::worklet::DispatcherMapField<AnalysisType> dispatcher(ftleCalculator);
 	  dispatcher.Invoke(lcsInputPoints, lcsOutputPoints, ftleField);
 
+		vtkSmartPointer<vtkFloatArray> ftle_out = vtkSmartPointer<vtkFloatArray>::New();
+	// Add fields computed this iteration to a dataset.
+		std::stringstream ftle_field_name;
+		ftle_field_name << "ftle_" << c;
+		ftle_out->SetName(ftle_field_name.str().c_str());
+		for(int i = 0; i < num_pts_slice; i++)
+		{
+			auto f = ftleField.ReadPortal().Get(i);
+			ftle_out->InsertNextValue(f);
+		}	
+		outputGrid->GetPointData()->AddArray(ftle_out);
+
 		// generate flow map for this time interval 
 
 		/*
@@ -264,7 +335,8 @@ int main(int argc, char* argv[])
  */
 		vtkm::cont::ArrayHandle<vtkm::Particle> basis_set;
 		basis_set.Allocate(num_pts_slice);
-	
+
+//		#pragma omp parallel for	
 		for(int i = 0; i < num_pts_slice; i++)
 		{
 	      basis_set.WritePortal().Set(i, vtkm::Particle(Vec3f(static_cast<vtkm::FloatDefault>(uni_x[i]), 
@@ -274,36 +346,101 @@ int main(int argc, char* argv[])
 			
 		res_rk4 = particleadvection.Run(rk4, basis_set, 100);	
 		auto updated_basis = res_rk4.Particles;	
+//		#pragma omp parallel for
 		for(int i = 0; i < num_pts_slice; i++)
 		{
-			auto pt = updated_basis.ReadPortal().Get(i).Pos;
-			flowmap_field.WritePortal().Set(i, vtkm::Vec<vtkm::FloatDefault, 3>(static_cast<vtkm::FloatDefault>(pt[0]), static_cast<vtkm::FloatDefault>(pt[1]), static_cast<vtkm::FloatDefault>(0.0)));
+			auto start = basis_set.ReadPortal().Get(i).Pos;
+			auto end = updated_basis.ReadPortal().Get(i).Pos;
+		
+			float disp[2];
+			disp[0] = end[0] - start[0];
+			disp[1] = end[1] - start[1];
+			 
+			flowmap_field.WritePortal().Set(i, vtkm::Vec<vtkm::FloatDefault, 3>(static_cast<vtkm::FloatDefault>(disp[0]), 
+																																					static_cast<vtkm::FloatDefault>(disp[1]), 
+																																					static_cast<vtkm::FloatDefault>(0.0)));
 		}
 			
-		GridEvalType2d eval_lagrangian(coords2d, cells2d, flowmap_field);
+		GridEvalType3d eval_lagrangian(coords2d, cells2d, flowmap_field);
 		LagrangianType lagrangian(eval_lagrangian, static_cast<vtkm::Float32>(1.0));
-/*		
+
 		res_lag = particleadvection.Run(lagrangian, test_set, 1);	
 	// Use res_lag to update test_set , and compute uncertainty. 
 		
 		auto updated_test = res_lag.Particles;
+//		#pragma omp parallel for
 		for(int i = 0; i < num_pts_slice; i++)
     {
-     	auto pt = updated_test.ReadPortal().Get(i).Pos;
+  		auto gt = updated_particles.ReadPortal().Get(i).Pos; 
+	  	auto pt = updated_test.ReadPortal().Get(i).Pos;
      	test_set.WritePortal().Set(i, vtkm::Particle(Vec3f(static_cast<vtkm::FloatDefault>(pt[0]),
        	                                                 static_cast<vtkm::FloatDefault>(pt[1]),
          	                                               static_cast<vtkm::FloatDefault>(c)), i));
-    }	
-*/
-	// Add fields computed this iteration to a dataset.
-		std::stringstream field_name;
-		field_name << "ftle_" << c;
-  	output.AddPointField(field_name.str().c_str(), ftleField);
-		std::cout << "Completed interval : " << c << std::endl;
+			// Update endpt and aedr
+			float diff = sqrt(pow(gt[0]-pt[0],2.0) + pow(gt[1]-pt[1],2.0));		
+			endpt.WritePortal().Set(i, static_cast<vtkm::FloatDefault>(diff));
+			
+			auto previous = aedr.ReadPortal().Get(i);
+			if(diff < aedr_threshold)
+			{
+				vtkm::FloatDefault error = diff/aedr_threshold;
+				aedr.WritePortal().Set(i, static_cast<vtkm::FloatDefault>(error + previous));
+			}
+			else
+			{
+				aedr.WritePortal().Set(i, static_cast<vtkm::FloatDefault>(1.0 + previous));
+			}
+    }
+
+		vtkSmartPointer<vtkFloatArray> fm = vtkSmartPointer<vtkFloatArray>::New();
+    std::stringstream fm_name;
+    fm_name << "fm_" << c;
+    fm->SetName(fm_name.str().c_str());
+		fm->SetNumberOfComponents(2);
+		fm->SetNumberOfTuples(num_pts_slice);	
+    for(int i = 0; i < num_pts_slice; i++)
+    {
+      auto f = flowmap_field.ReadPortal().Get(i);
+//      fm->InsertNextTuple2(f[0], f[1]);
+  		float disp[2];
+			disp[0] = f[0];
+			disp[1] = f[1];
+			fm->InsertTuple(i, disp);	
+	  }
+    outputGrid->GetPointData()->AddArray(fm);
+		
+		std::cout << "Completed an interval." << std::endl;
 	}
 	
-	vtkm::io::VTKDataSetWriter writer("ftle.vtk");
-	writer.WriteDataSet(output);
+	vtkSmartPointer<vtkFloatArray> aedr_error = vtkSmartPointer<vtkFloatArray>::New();
+	aedr_error->SetName("aedr");
+	for(int i = 0; i < num_pts_slice; i++)
+	{
+		auto e = aedr.ReadPortal().Get(i);
+		aedr_error->InsertNextValue(e/end_time);
+	}
+	outputGrid->GetPointData()->AddArray(aedr_error);
+	
+	vtkSmartPointer<vtkFloatArray> endpt_error = vtkSmartPointer<vtkFloatArray>::New();
+	endpt_error->SetName("endpt");
+	for(int i = 0; i < num_pts_slice; i++)
+	{
+		auto e = endpt.ReadPortal().Get(i);
+		endpt_error->InsertNextValue(e);
+	}
+	outputGrid->GetPointData()->AddArray(endpt_error);
+
+  std::stringstream op;
+  op << output_file <<  ".vtk";
+
+  writer->SetFileName(op.str().c_str());
+  writer->SetInputData(outputGrid);
+  writer->SetFileTypeToBinary();
+  writer->Write();
+
+	
+//	vtkm::io::VTKDataSetWriter writer("ftle.vtk");
+//	writer.WriteDataSet(output);
 
 /*  vector<vtkm::Float64> temp_d, temp_v, temp_q, temp_g;
 
