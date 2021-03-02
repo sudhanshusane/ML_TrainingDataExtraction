@@ -64,9 +64,9 @@ int main(int argc, char* argv[])
   mesh = reader->GetOutput();
   int num_pts = mesh->GetNumberOfPoints();
 	int dims[3];
-	dims[0] = 512;
-	dims[1] = 512;
-	dims[2] = 1001;
+	dims[0] = atoi(argv[7]);
+	dims[1] = atoi(argv[8]);
+	dims[2] = atoi(argv[9]);
 
 	int num_pts_slice = dims[0]*dims[1];	
 //  std::cout << "The number of points: " << num_pts << std::endl;
@@ -343,22 +343,46 @@ int main(int argc, char* argv[])
 																														static_cast<vtkm::FloatDefault>(uni_y[i]), 
 																														static_cast<vtkm::FloatDefault>(c-1)), i));
 		}
+		
+
+
+
+//		vtkSmartPointer<vtkFloatArray> fm = vtkSmartPointer<vtkFloatArray>::New();
+		vtkSmartPointer<vtkFloatArray> fm_u = vtkSmartPointer<vtkFloatArray>::New();
+		vtkSmartPointer<vtkFloatArray> fm_v = vtkSmartPointer<vtkFloatArray>::New();
+    std::stringstream fm_name_u, fm_name_v, fm_name;
+//		fm_name << "fm_" << c;
+    fm_name_u << "fm_u_" << c;
+    fm_name_v << "fm_v_" << c;
+//		fm->SetName(fm_name.str().c_str());
+    fm_u->SetName(fm_name_u.str().c_str());
+    fm_v->SetName(fm_name_v.str().c_str());
+//		fm->SetNumberOfComponents(2);
+//		fm_u->SetNumberOfComponents(1);
+//		fm_v->SetNumberOfComponents(1);
+//		fm->SetNumberOfTuples(num_pts_slice);
+//		fm_u->SetNumberOfValues(num_pts_slice);	
+//		fm_v->SetNumberOfValues(num_pts_slice);	
 			
 		res_rk4 = particleadvection.Run(rk4, basis_set, 100);	
 		auto updated_basis = res_rk4.Particles;	
 //		#pragma omp parallel for
-		for(int i = 0; i < num_pts_slice; i++)
+		
+		std::cout << "The number of points in the flow map scalar fields: " << num_pts_slice << std::endl;
+    for(int i = 0; i < num_pts_slice; i++)
 		{
-			auto start = basis_set.ReadPortal().Get(i).Pos;
 			auto end = updated_basis.ReadPortal().Get(i).Pos;
 		
 			float disp[2];
-			disp[0] = end[0] - start[0];
-			disp[1] = end[1] - start[1];
+			disp[0] = end[0] - uni_x[i];
+			disp[1] = end[1] - uni_y[i];
 			 
 			flowmap_field.WritePortal().Set(i, vtkm::Vec<vtkm::FloatDefault, 3>(static_cast<vtkm::FloatDefault>(disp[0]), 
 																																					static_cast<vtkm::FloatDefault>(disp[1]), 
 																																					static_cast<vtkm::FloatDefault>(0.0)));
+			fm_u->InsertNextValue(disp[0]);
+			fm_v->InsertNextValue(disp[1]);
+//			fm->InsertTuple(i, disp);
 		}
 			
 		GridEvalType3d eval_lagrangian(coords2d, cells2d, flowmap_field);
@@ -392,22 +416,9 @@ int main(int argc, char* argv[])
 			}
     }
 
-		vtkSmartPointer<vtkFloatArray> fm = vtkSmartPointer<vtkFloatArray>::New();
-    std::stringstream fm_name;
-    fm_name << "fm_" << c;
-    fm->SetName(fm_name.str().c_str());
-		fm->SetNumberOfComponents(2);
-		fm->SetNumberOfTuples(num_pts_slice);	
-    for(int i = 0; i < num_pts_slice; i++)
-    {
-      auto f = flowmap_field.ReadPortal().Get(i);
-//      fm->InsertNextTuple2(f[0], f[1]);
-  		float disp[2];
-			disp[0] = f[0];
-			disp[1] = f[1];
-			fm->InsertTuple(i, disp);	
-	  }
-    outputGrid->GetPointData()->AddArray(fm);
+    outputGrid->GetPointData()->AddArray(fm_u);
+    outputGrid->GetPointData()->AddArray(fm_v);
+ //   outputGrid->GetPointData()->SetVectors(fm);
 		
 		std::cout << "Completed an interval." << std::endl;
 	}
@@ -435,7 +446,7 @@ int main(int argc, char* argv[])
 
   writer->SetFileName(op.str().c_str());
   writer->SetInputData(outputGrid);
-  writer->SetFileTypeToBinary();
+  writer->SetFileTypeToASCII();
   writer->Write();
 
 	
