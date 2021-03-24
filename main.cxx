@@ -11,6 +11,7 @@
 #include <vtkDataSetWriter.h>
 #include <sstream>
 #include <iostream>
+#include <vector>
 #include <omp.h>
 #include <vtkm/Matrix.h>
 #include <vtkm/Types.h>
@@ -35,6 +36,145 @@
 #include <vtkm/worklet/lcs/GridMetaData.h>
 #include <vtkm/worklet/lcs/LagrangianStructureHelpers.h>
 #include <vtkm/worklet/LagrangianStructures.h>
+
+#define PI 3.14159265
+#define DIM_THETA 60
+#define DIM_PHI 1
+
+float calculateEntropy(int *bins, int num_bins)
+{ 
+  float probability[num_bins];
+  int total_sum = 0; 
+  for(int i = 0; i < num_bins; i++)
+  { 
+    total_sum += bins[i];
+  }
+
+  for(int i = 0; i < num_bins; i++)
+  { 
+    probability[i] = bins[i]/(total_sum*1.0);
+  }
+  
+  float entropy = 0.0;
+  
+  for(int i = 0; i < num_bins; i++)
+  { 
+    if(probability[i] > 0.0)
+      entropy -= (probability[i]*log2(probability[i]));
+  }
+  
+  return entropy;
+}
+
+void estimateDistribution(int *bins, int num_bins, double* x, double* y, double* z, int N)
+{
+  /* There are DIM_THETA * DIM_PHI bins */
+  
+  double theta_range = 360.0/DIM_THETA; // 12
+  double phi_range = 180.0/DIM_PHI; // 12
+
+  /* BINS are ordered by increasing PHI
+ *   // 0 [0,0] to [theta_range + 0 , phi_range + 0] .. 1 [0, phi_range + 0] to [theta_range + 0, phi_range*2 + 0]
+ *
+ *     // Theta_index = theta/theta_range; */
+
+  int num_samples = N*N;
+  for(int i = 0; i < num_samples; i++)
+  {
+    /* All values of theta and phi are between:
+ *     // 0 < Theta < 360
+ *         // 0 < Phi < 180 */
+
+    double radius, theta, phi;
+    radius = sqrt((x[i]*x[i]) + (y[i]*y[i]) + (z[i]*z[i]));
+    if(radius > 0)
+    {
+      theta = (atan2(y[i],x[i]))*(180/PI);
+      phi = (acos(z[i]/radius))*(180/PI);
+      if(theta < 0)
+        theta = 360 + theta; /* theta value is negative, i.e., -90 is the same as 270 */
+    }
+    else
+    {
+      theta = 0;
+      phi = 0;
+    }
+
+    int t_index = theta/theta_range;
+    int p_index = phi/phi_range;
+    int bin_index = (t_index * DIM_PHI) + p_index;
+    if(bin_index > DIM_THETA*DIM_PHI)
+    {
+      cout << "Indexing error" << endl;
+    }
+    else
+    {
+      bins[bin_index]++;
+    }
+/*    cout << "For : " << x[i] << "," << y[i] << "," << z[i] << " the value of radius is : " << radius << " the value of theta is : " << theta << " the value of phi is : " << phi << " the bin index is : " << bin_index << endl;*/
+  }
+
+}
+
+
+void sampleNeighborhood(double *sample_x, double *sample_y, double *sample_z, int N, int *dims, int i, int j, int k, double *vec_x, double *vec_y, double *vec_z)
+{
+  int offset = (N-1)/2;
+  int num_samples = N*N;
+  int cnt = 0;
+
+  if(dims[0] > N && dims[1] > N) // && dims[2] > N
+  {
+      /*    for(int r = k - offset; r < k + offset; r++)
+ *          //    {    */
+    for(int q = j - offset; q < j + offset; q++)
+    {
+      for(int p = i - offset; p < i + offset; p++) // x grows fastest
+      {
+            /* Left out
+ *             // Right out
+ *                         // Top out
+ *                                     // Bottom out
+ *                                                 // Front out
+ *                                                             // Back out */
+            int x_i, y_i, z_i;
+            if(p < 0)
+              x_i = -1*p;
+            else if(p > (dims[0] -1))        
+              x_i = (dims[0] - 1) - (p - (dims[0] - 1));
+            else
+              x_i = p;
+            if(q < 0)
+              y_i = -1*q;
+            else if(q > (dims[1] -1))        
+              y_i = (dims[1] - 1) - (q - (dims[1] - 1));
+            else
+              y_i = q;
+         /*   if(r < 0)
+ *                 z_i = -1*r;
+ *                             else if(r > (dims[2] -1))        
+ *                                           z_i = (dims[2] - 1) - (r - (dims[2] - 1));
+ *                                                       else
+ *                                                                    z_i = r;
+ *                                                                               */
+
+              z_i = k;
+
+              int index = z_i*dims[1]*dims[0] + y_i*dims[0] + x_i;
+              sample_x[cnt] = vec_x[index];
+              sample_y[cnt] = vec_y[index];
+              sample_z[cnt] = vec_z[index];
+              cnt++;
+      /*    } */
+        }
+      }
+  }
+  else
+  {
+    /* Neighborhood too large */
+  }
+}
+
 
 int main(int argc, char* argv[])
 {
@@ -104,13 +244,18 @@ int main(int argc, char* argv[])
 
 /* Extract 2D slice */ 
 
+	double* vec_x, *vec_y, *vec_z;
+	vec_x = (double*)malloc(sizeof(double)*num_pts_slice);
+	vec_y = (double*)malloc(sizeof(double)*num_pts_slice);
+	vec_z = (double*)malloc(sizeof(double)*num_pts_slice);
+
 	vtkSmartPointer<vtkPoints> points = vtkSmartPointer<vtkPoints>::New();
 	vtkSmartPointer<vtkDoubleArray> vel_array = vtkSmartPointer<vtkDoubleArray>::New();
 	vel_array->SetNumberOfComponents(3);
 	vel_array->SetNumberOfTuples(num_pts_slice);
 	vel_array->SetName("velocity");
 
-	int k = atoi(argv[5]); // Slice at z = 1
+	int k = atoi(argv[5]); // Slice at z = 0
 	for(int j = 0; j < dims[1]; j++)
 	{
 		for(int i = 0; i < dims[0]; i++)
@@ -123,6 +268,9 @@ int main(int argc, char* argv[])
 			vec[2] = 0.0;
 			points->InsertNextPoint(xc[i], yc[j], 0);
 			vel_array->InsertTuple(index2, vec);	
+			vec_x[index2] = vec[0];
+			vec_y[index2] = vec[1];
+			vec_z[index2] = vec[2];
 		}
 	}	
 
@@ -162,7 +310,40 @@ int main(int argc, char* argv[])
 		vortmag_field->InsertNextValue(val);
 	}
 	outputGrid->GetPointData()->AddArray(vortmag_field);
+
+	int N[3] = {4, 32, 64};
+	for(int n = 0; n < 3; n++)
+	{
+		int num_samples = N[n]*N[n];
+
+		vtkSmartPointer<vtkFloatArray> entropy_field = vtkSmartPointer<vtkFloatArray>::New();
+		std::stringstream e_name;
+		e_name << "entropy_" << (n+1);
+		entropy_field->SetName(e_name.str().c_str());
+		for(int k = 0; k < 1; k++)
+		{
+			for(int j = 0; j < dims[1]; j++)
+			{
+				for(int i = 0; i < dims[0]; i++)
+				{
+	        int num_bins = DIM_THETA * DIM_PHI;
+  	      int bins[num_bins] = {0};
+    	    int index = k*dims[1]*dims[0] + j*dims[0] + i;
 	
+	        double sample_x[num_samples],sample_y[num_samples],sample_z[num_samples];
+	
+  	      sampleNeighborhood(sample_x, sample_y, sample_z, N[n], dims, i, j, k, vec_x, vec_y, vec_z);
+    	    estimateDistribution(bins, num_bins, sample_x, sample_y, sample_z, N[n]);
+      	  float H = calculateEntropy(bins, num_bins);
+	
+ 	       entropy_field->InsertNextValue(H);				
+				}
+			}
+		}
+		
+		outputGrid->GetPointData()->AddArray(entropy_field);
+
+	}
 	std::cout << "Extracted fields from select time slices." << std::endl;
 
 //	std::cout << "Gradient field: " << gradient_field->GetNumberOfValues() << " , " << gradient_field->GetNumberOfComponents() << std::endl;
