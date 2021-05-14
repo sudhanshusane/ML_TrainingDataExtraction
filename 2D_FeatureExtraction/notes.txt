@@ -1,0 +1,1 @@
+Compute the entropy, vorticity, divergence, gradient, q-criterion, ftle, for a velocity field. Computes flow maps, and evaluates reconstruction error of flow maps - aedr and end point. 
