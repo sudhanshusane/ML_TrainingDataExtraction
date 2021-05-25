@@ -1,3 +1,5 @@
+#include "cnpy.h"
+#include <complex>
 #include <vtkPointData.h>
 #include <vtkCellData.h>
 #include <vtkDoubleArray.h>
@@ -180,19 +182,10 @@ void sampleNeighborhood(double *sample_x, double *sample_y, double *sample_z, in
 
 int main(int argc, char* argv[])
 {
-/*
- * Load a file
- * Get dims, bounds
- * Generate seed_0 --- locations of seed particles at time 0
- * Extract the 2D slice at time 0
- * Compute entropy, divergence, vorticitymagnitude 
- * flow maps
- * ftle 
- */
 	using Vec3f = vtkm::Vec<vtkm::FloatDefault, 3>;	
 	
 	std::stringstream s;
-	s << argv[1] << argv[2] << argv[3];
+	s << argv[1] << argv[2] << argv[3]; // argv[2] should support multiple files.
 	std::cout << "Inputfile: " << s.str() << std::endl;
 
 	std::string output_file(argv[4]);
@@ -214,9 +207,9 @@ int main(int argc, char* argv[])
 	int sdims[2];
 	sdims[0] = atoi(argv[8]);
 	sdims[1] = atoi(argv[9]);
-
-	int num_intervals = atoi(argv[10]);
-	int num_steps = atoi(argv[11]);
+ 
+	int num_intervals = atoi(argv[10]); // Need to be able to have interval options per num_steps
+	int num_steps = atoi(argv[11]);  // Need to be able to set multiple options
 	vtkm::Float32 step_size = atof(argv[12]); 
 
 	int num_pts_slice = dims[0]*dims[1];	
@@ -261,152 +254,24 @@ int main(int argc, char* argv[])
 		syCoords->InsertNextValue(yc[0] + (i*sy_spacing));
 	}
 
+
 /* Create output file */
 
 	vtkSmartPointer<vtkDataSetWriter> writer =
 		vtkSmartPointer<vtkDataSetWriter>::New();
 
-	vtkSmartPointer<vtkRectilinearGrid> outputGrid = 
-		vtkSmartPointer<vtkRectilinearGrid>::New();
-	
-	outputGrid->SetDimensions(sdims[0], sdims[1], 1);
-  outputGrid->SetXCoordinates(sxCoords);
-  outputGrid->SetYCoordinates(syCoords);
-  outputGrid->SetZCoordinates(szCoords);
 
-
-/* Extract 2D slice */ 
-/*
-	double* vec_x, *vec_y, *vec_z;
-	vec_x = (double*)malloc(sizeof(double)*num_pts_slice);
-	vec_y = (double*)malloc(sizeof(double)*num_pts_slice);
-	vec_z = (double*)malloc(sizeof(double)*num_pts_slice);
-
-	vtkSmartPointer<vtkPoints> points = vtkSmartPointer<vtkPoints>::New();
-	vtkSmartPointer<vtkDoubleArray> vel_array = vtkSmartPointer<vtkDoubleArray>::New();
-	vel_array->SetNumberOfComponents(3);
-	vel_array->SetNumberOfTuples(num_pts_slice);
-	vel_array->SetName("velocity");
-
-	int k = atoi(argv[5]); // Slice at z = 0
-	for(int j = 0; j < dims[1]; j++)
-	{
-		for(int i = 0; i < dims[0]; i++)
-		{
-			int index1 = k*dims[1]*dims[0] + j*dims[0] + i;
-			int index2 = j*dims[0] + i;
-			double vec[3];
-			vec[0] = att1->GetTuple1(index1);
-			vec[1] = att2->GetTuple1(index1);
-			vec[2] = 0.0;
-			points->InsertNextPoint(xc[i], yc[j], 0);
-			vel_array->InsertTuple(index2, vec);	
-			vec_x[index2] = vec[0];
-			vec_y[index2] = vec[1];
-			vec_z[index2] = vec[2];
-		}
-	}	
-
-	vtkSmartPointer<vtkStructuredGrid> slice = vtkSmartPointer<vtkStructuredGrid>::New();
-	slice->SetDimensions(dims[0], dims[1], 1);
-	slice->SetPoints(points);
-	slice->GetPointData()->AddArray(vel_array);
-
-	vtkSmartPointer<vtkGradientFilter> gradient = vtkSmartPointer<vtkGradientFilter>::New();	
-	gradient->SetInputData(slice);
-	gradient->SetInputScalars(vtkDataObject::FIELD_ASSOCIATION_POINTS, "velocity");
-	gradient->SetComputeVorticity(1);
-	gradient->SetComputeQCriterion(1);
-	gradient->SetComputeDivergence(0);
-	gradient->Update();
-
-//  vtkDoubleArray *gradient_field = vtkDoubleArray::SafeDownCast(gradient->GetOutput()->GetPointData()->GetArray("Gradients"));
-//	gradient_field->SetName("gradient");
-//	outputGrid->GetPointData()->AddArray(gradient_field);
-
-//  vtkDoubleArray *divergence_field = vtkDoubleArray::SafeDownCast(gradient->GetOutput()->GetPointData()->GetArray("Divergence"));
-//	divergence_field->SetName("divergence");
-//	outputGrid->GetPointData()->AddArray(divergence_field);
-
-  vtkDoubleArray *qcriterion_field = vtkDoubleArray::SafeDownCast(gradient->GetOutput()->GetPointData()->GetArray("Q-criterion"));
-	qcriterion_field->SetName("qc");
-	outputGrid->GetPointData()->AddArray(qcriterion_field);
-
-  vtkDoubleArray *vorticity_field = vtkDoubleArray::SafeDownCast(gradient->GetOutput()->GetPointData()->GetArray("Vorticity"));
-	vtkSmartPointer<vtkFloatArray> vortmag_field = vtkSmartPointer<vtkFloatArray>::New();
-	vortmag_field->SetName("vortmag");
-	for(int i = 0; i < num_pts_slice; i++)
-	{
-		double pt_vort[3];
-		vorticity_field->GetTuple(i, pt_vort);	
-		float val = sqrt(pow(pt_vort[0],2.0) + pow(pt_vort[1],2.0) + pow(pt_vort[2], 2.0));
-		vortmag_field->InsertNextValue(val);
-	}
-	outputGrid->GetPointData()->AddArray(vortmag_field);
-
-	int N[3] = {4, 32, 64};
-	for(int n = 0; n < 3; n++)
-	{
-		int num_samples = N[n]*N[n];
-
-		vtkSmartPointer<vtkFloatArray> entropy_field = vtkSmartPointer<vtkFloatArray>::New();
-		std::stringstream e_name;
-		e_name << "entropy_" << (n+1);
-		entropy_field->SetName(e_name.str().c_str());
-		for(int k = 0; k < 1; k++)
-		{
-			for(int j = 0; j < dims[1]; j++)
-			{
-				for(int i = 0; i < dims[0]; i++)
-				{
-	        int num_bins = DIM_THETA * DIM_PHI;
-  	      int bins[num_bins] = {0};
-    	    int index = k*dims[1]*dims[0] + j*dims[0] + i;
-	
-	        double sample_x[num_samples],sample_y[num_samples],sample_z[num_samples];
-	
-  	      sampleNeighborhood(sample_x, sample_y, sample_z, N[n], dims, i, j, k, vec_x, vec_y, vec_z);
-    	    estimateDistribution(bins, num_bins, sample_x, sample_y, sample_z, N[n]);
-      	  float H = calculateEntropy(bins, num_bins);
-	
- 	       entropy_field->InsertNextValue(H);				
-				}
-			}
-		}
-		
-		outputGrid->GetPointData()->AddArray(entropy_field);
-
-	}
-	std::cout << "Extracted fields from select time slices." << std::endl;
-*/
-//	std::cout << "Gradient field: " << gradient_field->GetNumberOfValues() << " , " << gradient_field->GetNumberOfComponents() << std::endl;
-//	std::cout << "Vorticity field: " << vorticity_field->GetNumberOfValues() << " , " << vorticity_field->GetNumberOfComponents() << std::endl;
-//	std::cout << "Q-criterion field: " << qcriterion_field->GetNumberOfValues() << " , " << qcriterion_field->GetNumberOfComponents() << std::endl;
-//	std::cout << "Divergence field: " << divergence_field->GetNumberOfValues() << " , " << divergence_field->GetNumberOfComponents() << std::endl;
-	
-/*
- *  For a grid of starting locations S in three dimensions.
- *  I want to compute where these particles travel after time = 1 and 2, with a step size of 0.01, 100 and 200 steps 
- *  I want to store the locations at t1 and the corresponding ftle. 
- *  Then I also want to store  
-*/  
-
-	/*
- * Set up to compute flow maps, and two sets of long trajectories. 
- */
-
-
-
-
-	float* uni_x = (float*)malloc(sizeof(float)*num_seeds_interval);
+	float* uni_x = (float*)malloc(sizeof(float)*num_seeds_interval);   // Seed locations for flow map
 	float* uni_y = (float*)malloc(sizeof(float)*num_seeds_interval); 
 	
-	float* uni_sx = (float*)malloc(sizeof(float)*num_cells_interval);
+	float* uni_sx = (float*)malloc(sizeof(float)*num_cells_interval);   // Seed locations for test and ground truth seeds
 	float* uni_sy = (float*)malloc(sizeof(float)*num_cells_interval); 
 
 	vtkm::cont::ArrayHandle<vtkm::FloatDefault> endpt;
 	vtkm::cont::ArrayHandle<vtkm::Particle> flowmap_set, gt_set, test_set, test_reset;
-
+	std::vector<double> ftle_val(num_seeds_interval);
+	std::vector<double> error_val(num_seeds_interval);
+	
 	endpt.Allocate(num_cells_interval);
 	flowmap_set.Allocate(num_seeds_interval*num_intervals);
 	gt_set.Allocate(num_cells_interval*num_intervals);
@@ -417,7 +282,7 @@ int main(int argc, char* argv[])
 	lcsInputPoints.Allocate(num_seeds_interval); // Equal to the size of flowmap set. FTLE is computed one flow map at a time. 
 	lcsOutputPoints.Allocate(num_seeds_interval);
 
-//	#pragma omp parallel for 
+	// Compute the set of starting locations along a uniform grid for the flow map.
 	for(int j = 0; j < sdims[1]; j++)
 	{
 		for(int i = 0; i < sdims[0]; i++)
@@ -430,7 +295,10 @@ int main(int argc, char* argv[])
 																													static_cast<vtkm::FloatDefault>(uni_y[index])));
 		}
 	}
-	
+
+	// Compute the set of starting locations along a uniform grid for the ground truth and test particles. 
+	// We set gt at same time as flow map (later depending on number of intervals). 
+	// We can set test now since test particles don't need time --- they interpolate flow maps.
 	for(int j = 0; j < sdims[1]-1; j++)
 	{
 		for(int i = 0; i < sdims[0]-1; i++)
@@ -451,9 +319,10 @@ int main(int argc, char* argv[])
 
 	int index = 0;
 	int sindex = 0;
-	for(int n = 0; n < num_intervals; n++)
+	for(int n = 0; n < num_intervals; n++)   // TODO: This will need to change if intervals are computed multiple times for varying step sizes. 
 	{
-		float time = n*advectionTime;
+		float time = n*step_size; // overlapping flow maps. Start times are 0, 0.01, 0.02, 0.03, .. 
+		//float time = n*advectionTime; // non-overlapping flow maps. Start times are 0, 1, 2, 3, .. for 100 steps.
 		for(int i = 0; i < num_seeds_interval; i++)
 		{
 			flowmap_set.WritePortal().Set(index, vtkm::Particle(Vec3f(static_cast<vtkm::FloatDefault>(uni_x[i]), 
@@ -473,8 +342,6 @@ int main(int argc, char* argv[])
 	std::cout << "Total number of flow map trajectories : " << index << " and expected is : " << num_seeds_interval*num_intervals << std::endl;
 	std::cout << "Total number of ground truth trajectories : " << sindex << " and expected is : " << num_cells_interval*num_intervals << std::endl;
 
-/* Create the 3D data set where the Z dimension is time. */
-
 	vtkm::Id3 datasetDims(dims[0], dims[1], dims[2]);
   Vec3f origin3d(static_cast<vtkm::FloatDefault>(xc[0]),
   	             static_cast<vtkm::FloatDefault>(yc[0]),
@@ -486,15 +353,11 @@ int main(int argc, char* argv[])
 	vtkm::cont::DataSetBuilderUniform uniformDatasetBuilder3d;
 	dataset = uniformDatasetBuilder3d.Create(datasetDims, origin3d, spacing3d); 
 
-
-// This dataset object can be used to compute all the ftle_set pathlines
-
 	vtkm::cont::ArrayHandle<vtkm::Vec<vtkm::FloatDefault, 3>> velocity_field;
 	vtkm::cont::ArrayHandle<vtkm::Vec<vtkm::FloatDefault, 3>> flowmap_field;
 	velocity_field.Allocate(num_pts);
 	flowmap_field.Allocate(num_seeds_interval);
 
-//	#pragma omp parallel for
 	for(int i = 0; i < num_pts; i++)
 	{
 		velocity_field.WritePortal().Set(i, vtkm::Vec<vtkm::FloatDefault, 3>(att1->GetTuple1(i), att2->GetTuple1(i), 1.0));
@@ -522,12 +385,6 @@ int main(int argc, char* argv[])
 	vtkm::cont::DataSetBuilderUniform uniformDatasetBuilder2d;
 	flowmap = uniformDatasetBuilder2d.Create(fmGridDims, origin2d, spacing2d);
 
-/* Set up output -- need to update to work for VTK better 
-
-  vtkm::cont::DataSet output;
-  output.AddCoordinateSystem(flowmap.GetCoordinateSystem());
-  output.SetCellSet(flowmap.GetCellSet());
-*/
 /* Set up bilinear Lagrangian-based interpolation using existing VTK-m infrastructure. Use Euler step with step size = 1 and flow maps as input. */
 
 
@@ -550,20 +407,19 @@ int main(int argc, char* argv[])
 	auto gt_updated = res_gt.Particles;
 
 	std::cout << "Computed ground truth" << std::endl;
-
-
+	
 	for(int i = 0; i < num_intervals; i++)
 	{
-		std::cout << "Starting interval: " << i << std::endl;
+		std::cout << "Starting iteration: " << i << std::endl;
 
-		vtkSmartPointer<vtkFloatArray> displacement_field = vtkSmartPointer<vtkFloatArray>::New();
-		std::stringstream s_d;
-		s_d << "displacement_" << i;
-		displacement_field->SetName(s_d.str().c_str());	
+//		vtkSmartPointer<vtkFloatArray> displacement_field = vtkSmartPointer<vtkFloatArray>::New();
+//		std::stringstream s_d;
+//		s_d << "displacement_" << i;
+//		displacement_field->SetName(s_d.str().c_str());	
 
 		for(int n = 0; n < num_seeds_interval; n++)
 		{
-			index = (i*num_seeds_interval) + n;
+			index = (i*num_seeds_interval) + n;  // flow map particles are selected by indexing by interval i. 
 			auto end = flowmap_updated.ReadPortal().Get(index).Pos;
       float disp[2];
       disp[0] = end[0] - uni_x[n];
@@ -573,9 +429,9 @@ int main(int argc, char* argv[])
       flowmap_field.WritePortal().Set(n, vtkm::Vec<vtkm::FloatDefault, 3>(static_cast<vtkm::FloatDefault>(disp[0]),
                                                                           static_cast<vtkm::FloatDefault>(disp[1]),
                                                                           static_cast<vtkm::FloatDefault>(0.0)));
-			displacement_field->InsertNextValue(sqrt(pow(disp[0],2.0) + pow(disp[1],2.0)));
+	//		displacement_field->InsertNextValue(sqrt(pow(disp[0],2.0) + pow(disp[1],2.0)));
 		}	
-		std::cout << "Processed flow map for interval " << i << " and created distance field. " << std::endl;
+	//	std::cout << "Processed flow map for interval " << i << " and created distance field. " << std::endl;
 
 		GridEvalType3d eval_lagrangian(coords2d, cells2d, flowmap_field);
 		LagrangianType lagrangian(eval_lagrangian, static_cast<vtkm::Float32>(1.0));
@@ -590,7 +446,7 @@ int main(int argc, char* argv[])
 
 		for(int n = 0; n < num_cells_interval; n++)
 		{
-			sindex = (i*num_cells_interval) + n;
+			sindex = (i*num_cells_interval) + n; // indexed by interval i since gt particles are all advected once ** IMPORTANT **  
 			auto g = gt_updated.ReadPortal().Get(sindex).Pos;
 			auto t = test_updated.ReadPortal().Get(n).Pos;
 			float error = sqrt(pow((g[0]-t[0]),2.0) + pow((g[1]-t[1]),2.0));
@@ -619,7 +475,7 @@ int main(int argc, char* argv[])
 		vtkAbstractArray* endpt_vals0 = c2p->GetOutput()->GetPointData()->GetArray(0);
 	  vtkFloatArray* endpt_point_field = vtkFloatArray::SafeDownCast(endpt_vals0);
 		std::stringstream s_e_pt;
-		s_e_pt << "endpt_" << i;
+		s_e_pt << "error_" << argv[2] << "_" << i;
 		endpt_point_field->SetName(s_e_pt.str().c_str());
  
     vtkm::cont::ArrayHandle<vtkm::FloatDefault> ftleField;
@@ -630,26 +486,43 @@ int main(int argc, char* argv[])
 		
 		vtkSmartPointer<vtkFloatArray> ftle_field = vtkSmartPointer<vtkFloatArray>::New();
 		std::stringstream s_f;
-		s_f << "ftle_" << i;
+		s_f << "ftle_" << argv[2] << "_" << i;
 		ftle_field->SetName(s_f.str().c_str());	
 
 		for(int i = 0; i < num_seeds_interval; i++)
 		{
 			auto f = ftleField.ReadPortal().Get(i);
 			ftle_field->InsertNextValue(f);
+			ftle_val[i] = f*1.0;
+			error_val[i] = endpt_point_field->GetTuple1(i)*1.0;
+
 		}	
+		
+		cnpy::npz_save("out.npz", s_f.str().c_str(), &ftle_val[0], {sdims[0], sdims[1], 1}, "a");	
+		cnpy::npz_save("out.npz", s_e_pt.str().c_str(), &error_val[0], {sdims[0], sdims[1], 1}, "a");	
+
+
+/*	
+		vtkSmartPointer<vtkRectilinearGrid> outputGrid = 
+			vtkSmartPointer<vtkRectilinearGrid>::New();
+		
+		outputGrid->SetDimensions(sdims[0], sdims[1], 1);
+  	outputGrid->SetXCoordinates(sxCoords);
+  	outputGrid->SetYCoordinates(syCoords);
+  	outputGrid->SetZCoordinates(szCoords);
 		outputGrid->GetPointData()->AddArray(ftle_field);
-		outputGrid->GetPointData()->AddArray(displacement_field);
-		outputGrid->GetCellData()->AddArray(endpt_cell_field);
+//		outputGrid->GetPointData()->AddArray(displacement_field);
+//		outputGrid->GetCellData()->AddArray(endpt_cell_field);
 		outputGrid->GetPointData()->AddArray(endpt_point_field);
 		
+  	std::stringstream op;
+  	op << output_file << "_" << i <<  ".vtk";
+
+  	writer->SetFileName(op.str().c_str());
+  	writer->SetInputData(outputGrid);
+  	writer->SetFileTypeToASCII();
+  	writer->Write();
+*/
 	}
 
-  std::stringstream op;
-  op << output_file <<  ".vtk";
-
-  writer->SetFileName(op.str().c_str());
-  writer->SetInputData(outputGrid);
-  writer->SetFileTypeToASCII();
-  writer->Write();
 }
